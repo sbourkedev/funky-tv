@@ -304,25 +304,51 @@ class HomePage {
         section.classList.remove('hidden');
         list.innerHTML = items.map(item => this.createCard(item)).join('');
 
-        // Attach click listeners
+        // Keep each tile resumable while allowing history removal independently.
         list.querySelectorAll('.dashboard-card').forEach(card => {
-            card.addEventListener('click', () => {
+            card.addEventListener('click', (event) => {
+                if (event.target.closest('.history-remove-button')) return;
                 const id = card.dataset.id;
-                const item = items.find(i => i.item_id === id);
-                if (item) {
-                    const type = item.item_type || item.type;
+                const item = items.find(i => String(i.item_id) === id);
+                if (item) this.playItem(item, true);
+            });
 
-                    // IF it's a series, checking details is better than blind resume
-                    // BUT for "Continue Watching", we ideally want to resume
-
-                    // Prioritize playing directly for resume tiles
-                    this.playItem(item, true); // true for resume
-                }
+            const removeButton = card.querySelector('.history-remove-button');
+            removeButton?.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const item = items.find(i => String(i.item_id) === card.dataset.id);
+                if (item) this.removeHistoryItem(item, card, removeButton);
             });
         });
 
         // Update scroll arrows after content renders
         this.updateScrollArrows();
+    }
+
+    async removeHistoryItem(item, card, button) {
+        button.disabled = true;
+        try {
+            const type = item.item_type || item.type;
+            const seriesId = item.parent_id || item.data?.seriesId;
+            const sourceId = item.source_id || item.data?.sourceId;
+            if (type === 'episode' && seriesId && sourceId) {
+                await window.API.history.removeSeries(sourceId, seriesId);
+            } else {
+                await window.API.history.remove(item.item_id);
+            }
+            card.remove();
+
+            const list = document.getElementById('continue-watching-list');
+            const section = document.getElementById('continue-watching-section');
+            if (list && !list.querySelector('.dashboard-card')) {
+                section?.classList.add('hidden');
+            } else {
+                this.updateScrollArrows();
+            }
+        } catch (err) {
+            console.error('[Dashboard] Could not remove item from watch history:', err);
+            button.disabled = false;
+        }
     }
 
     navigateToSeries(item) {
@@ -416,9 +442,12 @@ class HomePage {
 
         return `
             <div class="dashboard-card" data-id="${item_id}" data-type="${type}">
-                <div class="card-image">
-                    <img src="${posterUrl}" alt="${data.title || item.name}" loading="lazy" onerror="this.onerror=null;this.src='/img/poster-placeholder.jpg'">
-                    <div class="progress-bar-container">
+            <div class="card-image">
+                <img src="${posterUrl}" alt="${data.title || item.name}" loading="lazy" onerror="this.onerror=null;this.src='/img/poster-placeholder.jpg'">
+                <button class="history-remove-button" type="button" aria-label="Remove ${item.name || data.title || 'item'} from watch history" title="Remove from watch history">
+                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                </button>
+                <div class="progress-bar-container">
                         <div class="progress-bar" style="width: ${percent}%"></div>
                     </div>
                     <div class="play-icon-overlay">

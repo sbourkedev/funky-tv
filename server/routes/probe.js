@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { spawn } = require('child_process');
+const db = require('../db');
+const transcodeSession = require('../services/transcodeSession');
 
 /**
  * Probe endpoint - detects stream codecs and container
@@ -28,7 +30,7 @@ const BROWSER_AUDIO_CODECS = ['aac', 'mp3', 'opus', 'vorbis'];
 /**
  * Probe stream with ffprobe
  */
-function probeStream(url, ffprobePath, userAgent = null, timeout = 15000) {
+function probeStream(url, ffprobePath, userAgent = null, timeout = 15000, startupProfile = transcodeSession.getStartupProfile()) {
     return new Promise((resolve, reject) => {
         const args = [
             '-v', 'error',
@@ -36,8 +38,8 @@ function probeStream(url, ffprobePath, userAgent = null, timeout = 15000) {
             '-print_format', 'json',
             '-show_streams',
             '-show_format',
-            '-probesize', '5000000',
-            '-analyzeduration', '5000000',
+            '-probesize', startupProfile.probeSize,
+            '-analyzeduration', startupProfile.analyzeDuration,
             url
         ];
 
@@ -128,6 +130,7 @@ function analyzeProbeResult(probeResult, url) {
     return {
         video: videoCodec,
         audio: audioCodec,
+        duration: Number.isFinite(Number(format.duration)) ? Number(format.duration) : null,
         width: videoStream?.width || 0,
         height: videoStream?.height || 0,
         audioChannels: audioStream?.channels || 0, // For Smart Audio Copy
@@ -171,7 +174,9 @@ router.get('/', async (req, res) => {
     console.log(`[Probe] Probing: ${url.substring(0, 80)}... ${ua ? `(UA: ${ua})` : ''}`);
 
     try {
-        const probeResult = await probeStream(url, ffprobePath, ua);
+        const settings = await db.settings.get();
+        const startupProfile = transcodeSession.getStartupProfile(settings.transcodeStartup);
+        const probeResult = await probeStream(url, ffprobePath, ua, 15000, startupProfile);
         const analysis = analyzeProbeResult(probeResult, url);
 
         // Cache result

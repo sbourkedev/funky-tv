@@ -1,6 +1,6 @@
 {
-    "name": "nodecast-tv",
-    "version": "2.1.4",
+    "name": "funky-player",
+    "version": "6.6.6",
     "description": "Modern IPTV Player",
     "license": "GPL-3.0-only",
     "main": "server/index.js",

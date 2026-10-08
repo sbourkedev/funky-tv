@@ -29,7 +29,7 @@ transcodeSession.startCleanupInterval();
  * Body: { url: string, seekOffset?: number }
  */
 router.post('/session', async (req, res) => {
-    const { url, seekOffset, videoMode, videoCodec, audioCodec, audioChannels } = req.body;
+    const { url, seekOffset, videoMode, videoCodec, audioCodec, audioChannels, isLive } = req.body;
 
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
@@ -47,6 +47,7 @@ router.post('/session', async (req, res) => {
             hwEncoder: settings.hwEncoder || 'software',
             maxResolution: settings.maxResolution || '1080p',
             quality: settings.quality || 'medium',
+            transcodeStartup: settings.transcodeStartup || 'balanced',
             audioMixPreset: settings.audioMixPreset || 'auto', // Audio downmix preset
             // Upscaling options
             upscaleEnabled: settings.upscaleEnabled || false,
@@ -55,7 +56,8 @@ router.post('/session', async (req, res) => {
             videoMode: videoMode, // 'copy' or 'encode'
             videoCodec: videoCodec, // 'h264', 'hevc', etc.
             audioCodec: audioCodec, // 'aac', 'ac3', etc.
-            audioChannels: audioChannels // number of channels (2=stereo)
+            audioChannels: audioChannels, // number of channels (2=stereo)
+            isLive: isLive === true
         });
 
         await session.start();
@@ -176,6 +178,7 @@ router.get('/', async (req, res) => {
     console.log(`[Transcode] Using binary: ${ffmpegPath}`);
 
     // FFmpeg arguments for transcoding
+    const startupProfile = transcodeSession.getStartupProfile(settings.transcodeStartup);
     // Optimized for VOD content with incompatible audio (Dolby/AC3/EAC3)
     // Also works for live streams with ad stitching (Pluto TV, etc.)
     const args = [
@@ -183,8 +186,8 @@ router.get('/', async (req, res) => {
         '-loglevel', 'warning',
         '-user_agent', userAgent,
         // Faster startup - reduced probe/analyze for quicker first bytes
-        '-probesize', '2000000', // 2MB (reduced from 5MB)
-        '-analyzeduration', '3000000', // 3 seconds (reduced from 10s)
+        '-probesize', startupProfile.probeSize,
+        '-analyzeduration', startupProfile.analyzeDuration,
         // Error resilience: generate timestamps, discard corrupt packets
         '-fflags', '+genpts+discardcorrupt+nobuffer',
         // Ignore errors in stream and continue

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Funky TV Play Logo</title>
+  <desc>Minimalist white rounded play-button logo.</desc>
+  <path fill="#fff" fill-rule="evenodd" d="
+    M136 76
+    C105 76 82 101 82 133
+    V379
+    C82 411 105 436 136 436
+    C147 436 158 433 168 427
+    L395 286
+    C420 270 434 243 434 220
+    C434 197 420 170 395 154
+    L168 85
+    C158 79 147 76 136 76
+    Z
+
+    M153 146
+    L359 200
+    C371 204 378 212 378 220
+    C378 228 371 236 359 240
+    L153 366
+    C145 371 136 365 136 355
+    V157
+    C136 147 145 141 153 146
+    Z
+
+    M190 188
+    L303 220
+    L190 292
+    Z"/>
+</svg>

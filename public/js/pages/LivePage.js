@@ -91,14 +91,28 @@ class LivePage {
         }
     }
 
-    async show() {
+    async show({ resetFilters = false } = {}) {
         document.addEventListener('keydown', this.handleKeydown);
+
+        if (resetFilters) {
+            await this.resetFiltersAndRefresh();
+            return;
+        }
 
         // Only reload if channels aren't already loaded
         if (this.app.channelList.channels.length === 0) {
             await this.app.channelList.loadSources();
             await this.app.channelList.loadChannels();
         }
+    }
+
+    async resetFiltersAndRefresh() {
+        const channels = this.app.channelList;
+        if (channels.searchInput) channels.searchInput.value = '';
+        if (channels.sourceSelect) channels.sourceSelect.value = '';
+        if (channels.showHiddenCheckbox) channels.showHiddenCheckbox.checked = false;
+        if (!channels.sources?.length) await channels.loadSources();
+        await channels.loadChannels();
     }
 
     hide() {

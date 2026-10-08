@@ -95,6 +95,18 @@ const API = {
             API.request('GET', `/favorites/check?sourceId=${sourceId}&itemId=${itemId}&itemType=${itemType}`)
     },
 
+    // Watch history
+    history: {
+        getSeriesEpisodeProgress: (sourceId, seriesId) =>
+            API.request('GET', `/history/series/${encodeURIComponent(sourceId)}/${encodeURIComponent(seriesId)}`),
+        getMovieProgress: (sourceId) =>
+            API.request('GET', `/history/movies/${encodeURIComponent(sourceId)}`),
+        save: (entry) => API.request('POST', '/history', entry),
+        removeSeries: (sourceId, seriesId) =>
+            API.request('DELETE', `/history/series/${encodeURIComponent(sourceId)}/${encodeURIComponent(seriesId)}`),
+        remove: (itemId) => API.request('DELETE', `/history/${encodeURIComponent(itemId)}`)
+    },
+
     // Proxy
     proxy: {
         // Xtream
@@ -122,6 +134,8 @@ const API = {
                 const query = params.length ? `?${params.join('&')}` : '';
                 return API.request('GET', `/proxy/xtream/${sourceId}/vod_streams${query}`);
             },
+            vodInfo: (sourceId, vodId) =>
+                API.request('GET', `/proxy/xtream/${sourceId}/vod_info?vod_id=${vodId}`),
             seriesCategories: (sourceId, options = {}) => {
                 const params = options.includeHidden ? '?includeHidden=true' : '';
                 return API.request('GET', `/proxy/xtream/${sourceId}/series_categories${params}`);

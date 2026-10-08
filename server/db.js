@@ -74,8 +74,9 @@ function getDefaultSettings() {
     userAgentCustom: '',          // Custom UA string when preset is 'custom'
     // Transcoding settings
     hwEncoder: 'auto',            // auto | nvenc | amf | qsv | vaapi | software
-    maxResolution: '1080p',       // 4k | 1080p | 720p | 480p
+    maxResolution: '1080p',       // 4k | 1440p | 1080p | 720p | 480p
     quality: 'medium',            // high | medium | low
+    transcodeStartup: 'balanced', // fast | balanced | stable
     audioMixPreset: 'auto',       // auto | itu | night | cinematic | passthrough
     // Probe cache settings  
     probeCacheTTL: 300,           // 5 minutes for URL probe cache
@@ -83,7 +84,7 @@ function getDefaultSettings() {
     // Upscaling settings
     upscaleEnabled: false,
     upscaleMethod: 'hardware',    // hardware | software
-    upscaleTarget: '1080p'        // 1080p | 4k | 720p
+    upscaleTarget: '1080p'        // 720p | 1080p | 1440p | 4k
   };
 }
 

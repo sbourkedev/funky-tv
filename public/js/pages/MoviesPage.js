@@ -7,6 +7,11 @@ class MoviesPage {
     constructor(app) {
         this.app = app;
         this.container = document.getElementById('movies-grid');
+        this.detailsPanel = document.getElementById('movie-details');
+        this.currentMovie = null;
+        this.movieContinueButton = document.querySelector('.movie-continue-btn');
+        this.movieOverviewStorageKey = 'funky-player-movie-overview';
+        this.pendingMovieOverview = null;
         this.sourceSelect = document.getElementById('movies-source-select');
         this.categorySelect = document.getElementById('movies-category-select');
         this.searchInput = document.getElementById('movies-search');
@@ -20,7 +25,7 @@ class MoviesPage {
         this.isLoading = false;
         this.observer = null;
         this.favoriteIds = new Set(); // Track favorite movie IDs
-        this.showFavoritesOnly = false;
+        this.movieWatchStatus = new Map();
 
         this.init();
     }
@@ -44,6 +49,14 @@ class MoviesPage {
             searchTimeout = setTimeout(() => this.filterAndRender(), 300);
         });
 
+        document.querySelector('.movie-back-btn')?.addEventListener('click', () => this.hideMovieDetails());
+        document.querySelector('.movie-play-btn')?.addEventListener('click', () => {
+            if (this.currentMovie) this.playMovie(this.currentMovie, false);
+        });
+        this.movieContinueButton?.addEventListener('click', () => {
+            if (this.currentMovie) this.playMovie(this.currentMovie, true);
+        });
+
         // Set up IntersectionObserver for lazy loading
         this.observer = new IntersectionObserver((entries) => {
             if (entries[0].isIntersecting && !this.isLoading) {
@@ -51,16 +64,22 @@ class MoviesPage {
             }
         }, { rootMargin: '200px' });
 
-        // Favorites filter toggle
-        const favBtn = document.getElementById('movies-favorites-btn');
-        favBtn?.addEventListener('click', () => {
-            this.showFavoritesOnly = !this.showFavoritesOnly;
-            favBtn.classList.toggle('active', this.showFavoritesOnly);
-            this.filterAndRender();
-        });
     }
 
-    async show() {
+    async show({ resetFilters = false } = {}) {
+        if (resetFilters) {
+            await this.resetFiltersAndRefresh();
+            return;
+        }
+        if (!this.currentMovie) {
+            try {
+                const saved = sessionStorage.getItem(this.movieOverviewStorageKey);
+                if (saved) this.pendingMovieOverview = JSON.parse(saved);
+            } catch (err) {
+                console.warn('[Movies] Could not restore saved movie overview:', err);
+                sessionStorage.removeItem(this.movieOverviewStorageKey);
+            }
+        }
         // Load sources if not loaded
         if (this.sources.length === 0) {
             await this.loadSources();
@@ -68,12 +87,40 @@ class MoviesPage {
 
         // Load favorites
         await this.loadFavorites();
+        await this.loadMovieProgress();
 
         // Load movies if empty
         if (this.movies.length === 0) {
             await this.loadCategories();
             await this.loadMovies();
+        } else {
+            this.filterAndRender();
         }
+        if (this.currentMovie) this.renderMovieDetails(this.currentMovie);
+        if (this.pendingMovieOverview) {
+            const savedMovie = this.pendingMovieOverview;
+            this.pendingMovieOverview = null;
+            const movie = this.movies.find(item =>
+                String(item.sourceId) === String(savedMovie.sourceId)
+                && String(item.stream_id) === String(savedMovie.stream_id)
+            ) || savedMovie;
+            await this.showMovieDetails(movie);
+        }
+
+    }
+
+    async resetFiltersAndRefresh() {
+        this.hideMovieDetails();
+        // Replace the previous results before any network-backed setup calls so
+        // they do not flash while the refreshed list is being prepared.
+        this.container.innerHTML = '<div class="loading"><div class="loading-spinner"></div></div>';
+        if (this.searchInput) this.searchInput.value = '';
+        if (this.sourceSelect) this.sourceSelect.value = '';
+        if (this.categorySelect) this.categorySelect.value = '';
+        if (this.sources.length === 0) await this.loadSources();
+        await this.loadFavorites();
+        await this.loadCategories();
+        await this.loadMovies();
     }
 
     hide() {
@@ -208,6 +255,7 @@ class MoviesPage {
             }
 
             console.log(`[Movies] Total loaded: ${this.movies.length} movies`);
+            await this.loadMovieProgress();
             this.filterAndRender();
         } catch (err) {
             console.error('Error loading movies:', err);
@@ -217,15 +265,42 @@ class MoviesPage {
         }
     }
 
+    async loadMovieProgress() {
+        this.movieWatchStatus = new Map();
+        const sourceIds = this.sourceSelect?.value
+            ? [Number(this.sourceSelect.value)]
+            : this.sources.map(source => source.id);
+
+        const rowsBySource = await Promise.all(sourceIds.map(async sourceId => {
+            try {
+                return [sourceId, await API.history.getMovieProgress(sourceId)];
+            } catch (err) {
+                console.warn(`[Movies] Could not load watch status for source ${sourceId}:`, err.message);
+                return [sourceId, []];
+            }
+        }));
+
+        rowsBySource.forEach(([sourceId, rows]) => {
+            rows.forEach(row => this.movieWatchStatus.set(`${sourceId}:${row.item_id}`, row));
+        });
+
+        this.container?.querySelectorAll('.movie-card').forEach(card => {
+            const status = this.movieWatchStatus.get(`${card.dataset.sourceId}:${card.dataset.movieId}`);
+            const badge = card.querySelector('.movie-watched-badge');
+            if (status?.watched) {
+                card.classList.add('watched');
+                badge?.classList.remove('hidden');
+            } else {
+                card.classList.remove('watched');
+                badge?.classList.add('hidden');
+            }
+        });
+    }
+
     filterAndRender() {
         const searchTerm = this.searchInput?.value?.toLowerCase() || '';
 
         this.filteredMovies = this.movies.filter(m => {
-            // Filter by favorites if enabled
-            if (this.showFavoritesOnly) {
-                const favKey = `${m.sourceId}:${m.stream_id}`;
-                if (!this.favoriteIds.has(favKey)) return false;
-            }
             if (searchTerm && !m.name?.toLowerCase().includes(searchTerm)) {
                 return false;
             }
@@ -241,6 +316,9 @@ class MoviesPage {
             this.container.innerHTML = '<div class="empty-state"><p>No movies found</p></div>';
             return;
         }
+
+        const favoritesShelf = this.createFavoritesShelf();
+        if (favoritesShelf) this.container.appendChild(favoritesShelf);
 
         // Create loader element
         const loader = document.createElement('div');
@@ -273,48 +351,7 @@ class MoviesPage {
         const fragment = document.createDocumentFragment();
 
         batch.forEach(movie => {
-            const card = document.createElement('div');
-            card.className = 'movie-card';
-            card.dataset.movieId = movie.stream_id;
-            card.dataset.sourceId = movie.sourceId;
-
-            const poster = movie.stream_icon || movie.cover || '/img/placeholder.png';
-            const year = movie.year || movie.releaseDate?.substring(0, 4) || '';
-            const rating = movie.rating ? `${Icons.star} ${movie.rating}` : '';
-
-            const isFav = this.favoriteIds.has(`${movie.sourceId}:${movie.stream_id}`);
-
-            card.innerHTML = `
-                <div class="movie-poster">
-                    <img src="${poster}" alt="${movie.name}" 
-                         onerror="this.onerror=null;this.src='/img/placeholder.png'" loading="lazy">
-                    <div class="movie-play-overlay">
-                        <span class="play-icon">${Icons.play}</span>
-                    </div>
-                    <button class="favorite-btn ${isFav ? 'active' : ''}" title="${isFav ? 'Remove from Favorites' : 'Add to Favorites'}">
-                        <span class="fav-icon">${isFav ? Icons.favorite : Icons.favoriteOutline}</span>
-                    </button>
-                </div>
-                <div class="movie-info">
-                    <div class="movie-title">${movie.name}</div>
-                    <div class="movie-meta">
-                        ${year ? `<span>${year}</span>` : ''}
-                        ${rating ? `<span>${rating}</span>` : ''}
-                    </div>
-                </div>
-            `;
-
-            // Card click plays movie, but not if clicking favorite button
-            card.addEventListener('click', (e) => {
-                if (e.target.closest('.favorite-btn')) {
-                    const btn = e.target.closest('.favorite-btn');
-                    this.toggleFavorite(movie, btn);
-                    e.stopPropagation();
-                } else {
-                    this.playMovie(movie);
-                }
-            });
-            fragment.appendChild(card);
+            fragment.appendChild(this.createMovieCard(movie));
         });
 
         // Insert before loader
@@ -333,7 +370,154 @@ class MoviesPage {
         }
     }
 
-    async playMovie(movie) {
+    createMovieCard(movie) {
+        const card = document.createElement('div');
+        const watchStatus = this.movieWatchStatus.get(`${movie.sourceId}:${movie.stream_id}`);
+        const isWatched = Boolean(watchStatus?.watched);
+        const isFav = this.favoriteIds.has(`${movie.sourceId}:${movie.stream_id}`);
+        card.className = `movie-card ${isWatched ? 'watched' : ''}`;
+        card.dataset.movieId = movie.stream_id;
+        card.dataset.sourceId = movie.sourceId;
+
+        const poster = movie.stream_icon || movie.cover || '/img/placeholder.png';
+        const year = movie.year || movie.releaseDate?.substring(0, 4) || '';
+        const rating = movie.rating ? `${Icons.star} ${movie.rating}` : '';
+        card.innerHTML = `
+            <div class="movie-poster">
+                <img src="${poster}" alt="${movie.name}"
+                     onerror="this.onerror=null;this.src='/img/placeholder.png'" loading="lazy">
+                <div class="movie-play-overlay">
+                    <span class="play-icon">${Icons.play}</span>
+                </div>
+                <span class="movie-watched-badge ${isWatched ? '' : 'hidden'}">&#10003; Watched</span>
+                <button class="favorite-btn ${isFav ? 'active' : ''}" title="${isFav ? 'Remove from Favorites' : 'Add to Favorites'}">
+                    <span class="fav-icon">${isFav ? Icons.favorite : Icons.favoriteOutline}</span>
+                </button>
+            </div>
+            <div class="movie-info">
+                <div class="movie-title">${movie.name}</div>
+                <div class="movie-meta">
+                    ${year ? `<span>${year}</span>` : ''}
+                    ${rating ? `<span>${rating}</span>` : ''}
+                </div>
+                <button class="movie-overview-button" type="button">Overview</button>
+            </div>
+        `;
+        card.addEventListener('click', (event) => {
+            if (event.target.closest('.favorite-btn')) {
+                this.toggleFavorite(movie, event.target.closest('.favorite-btn'));
+                event.stopPropagation();
+            } else if (event.target.closest('.movie-overview-button')) {
+                event.stopPropagation();
+                this.showMovieDetails(movie);
+            } else {
+                this.playMovie(movie);
+            }
+        });
+        return card;
+    }
+
+    createFavoritesShelf() {
+        const favorites = this.filteredMovies.filter(movie =>
+            this.favoriteIds.has(`${movie.sourceId}:${movie.stream_id}`)
+        );
+        if (favorites.length === 0) return null;
+
+        const shelf = document.createElement('section');
+        shelf.className = 'favorites-shelf';
+        shelf.innerHTML = '<h3 class="favorites-shelf-title">Favorite Movies</h3>';
+        const cards = document.createElement('div');
+        cards.className = 'favorites-shelf-cards';
+        favorites.forEach(movie => cards.appendChild(this.createMovieCard(movie)));
+        shelf.appendChild(cards);
+        return shelf;
+    }
+
+    saveMovieOverview(movie) {
+        try {
+            sessionStorage.setItem(this.movieOverviewStorageKey, JSON.stringify({
+                sourceId: movie.sourceId,
+                stream_id: movie.stream_id,
+                name: movie.name || 'Movie',
+                stream_icon: movie.stream_icon || movie.cover || movie.movie_image || '',
+                plot: movie.plot || movie.description || '',
+                year: movie.year || movie.releaseDate || '',
+                rating: movie.rating || '',
+                genre: movie.genre || '',
+                duration: movie.duration || '',
+                container_extension: movie.container_extension || 'mp4',
+                category_id: movie.category_id
+            }));
+        } catch (err) {
+            console.warn('[Movies] Could not save selected movie overview:', err);
+        }
+    }
+
+    async showMovieDetails(movie) {
+        if (!movie) return;
+
+        this.currentMovie = movie;
+        this.container.classList.add('hidden');
+        this.detailsPanel.classList.remove('hidden');
+        this.renderMovieDetails(movie, true);
+        this.saveMovieOverview(movie);
+
+        try {
+            const details = await API.proxy.xtream.vodInfo(movie.sourceId, movie.stream_id);
+            const isStillSelected = this.currentMovie
+                && String(this.currentMovie.sourceId) === String(movie.sourceId)
+                && String(this.currentMovie.stream_id) === String(movie.stream_id);
+            if (!isStillSelected || !details) return;
+
+            const detailedMovie = {
+                ...movie,
+                ...(details.movie_data || {}),
+                ...(details.info || {}),
+                sourceId: movie.sourceId,
+                stream_id: movie.stream_id
+            };
+            this.currentMovie = detailedMovie;
+            this.renderMovieDetails(detailedMovie);
+            this.saveMovieOverview(detailedMovie);
+        } catch (err) {
+            console.warn('[Movies] Could not load movie synopsis:', err);
+            const isStillSelected = this.currentMovie
+                && String(this.currentMovie.sourceId) === String(movie.sourceId)
+                && String(this.currentMovie.stream_id) === String(movie.stream_id);
+            if (isStillSelected) this.renderMovieDetails(this.currentMovie);
+        }
+    }
+
+    renderMovieDetails(movie, isLoadingSynopsis = false) {
+        const poster = this.detailsPanel.querySelector('#movie-overview-poster');
+        poster.src = movie.stream_icon || movie.cover || movie.movie_image || movie.cover_big || '/img/placeholder.png';
+        poster.alt = `${movie.name || 'Movie'} poster`;
+        this.detailsPanel.querySelector('#movie-overview-title').textContent = movie.name || 'Movie';
+
+        const watchStatus = this.movieWatchStatus.get(`${movie.sourceId}:${movie.stream_id}`);
+        const canContinue = !watchStatus?.watched && Number(watchStatus?.progress) > 0;
+        this.movieContinueButton?.classList.toggle('hidden', !canContinue);
+
+        const synopsis = [movie.plot, movie.description, movie.info?.plot, movie.movie_data?.plot]
+            .find(value => typeof value === 'string' && value.trim());
+        this.detailsPanel.querySelector('#movie-overview-plot').textContent = synopsis || (isLoadingSynopsis ? 'Loading synopsis...' : 'No synopsis is available for this movie.');
+
+        const year = movie.year || movie.released?.substring(0, 4) || movie.releaseDate?.substring(0, 4);
+        const rating = movie.rating ? `Rating: ${movie.rating}` : '';
+        const genre = movie.genre || '';
+        const duration = movie.duration || '';
+        this.detailsPanel.querySelector('#movie-overview-meta').textContent =
+            [year, rating, genre, duration].filter(Boolean).join(' | ');
+    }
+
+    hideMovieDetails() {
+        this.detailsPanel.classList.add('hidden');
+        this.container.classList.remove('hidden');
+        this.currentMovie = null;
+        sessionStorage.removeItem(this.movieOverviewStorageKey);
+    }
+
+    async playMovie(movie, resume = true) {
         try {
             // Get stream URL for movie using the actual container extension from API
             // Xtream API returns container_extension (e.g., 'mp4', 'mkv', 'avi')
@@ -353,7 +537,10 @@ class MoviesPage {
                         rating: movie.rating,
                         sourceId: movie.sourceId,
                         categoryId: movie.category_id,
-                        containerExtension: container
+                        containerExtension: container,
+                        resumeTime: resume && !this.movieWatchStatus.get(`${movie.sourceId}:${movie.stream_id}`)?.watched
+                            ? (Number(this.movieWatchStatus.get(`${movie.sourceId}:${movie.stream_id}`)?.progress) || 0)
+                            : 0
                     }, result.url);
                 }
             }
@@ -394,6 +581,7 @@ class MoviesPage {
                 if (iconSpan) iconSpan.innerHTML = Icons.favoriteOutline;
             }
         }
+        this.filterAndRender();
     }
 }
 

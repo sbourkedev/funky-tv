@@ -126,7 +126,7 @@ async function detectQuickSync() {
         if (os.platform() === 'win32') {
             // Windows: Check via WMIC
             const result = execSync(
-                'wmic path win32_VideoController get name',
+                'powershell -command "(Get-CimInstance Win32_VideoController).Name"',
                 { timeout: 5000, encoding: 'utf-8', windowsHide: true }
             );
             hasIntelGpu = result.toLowerCase().includes('intel');
@@ -174,7 +174,7 @@ async function detectAMF() {
     try {
         // Windows: Check via WMIC for AMD/Radeon
         const result = execSync(
-            'wmic path win32_VideoController get name',
+            'powershell -command "(Get-CimInstance Win32_VideoController).Name"',
             { timeout: 5000, encoding: 'utf-8', windowsHide: true }
         );
 

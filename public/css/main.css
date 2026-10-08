@@ -186,8 +186,10 @@ h4 {
   font-size: 1.75rem;
 }
 
-.logo svg {
-  fill: var(--color-accent);
+.logo img {
+  width: 1.5em;
+  height: 1.5em;
+  object-fit: contain;
 }
 
 .brand-text {
@@ -205,7 +207,7 @@ h4 {
 }
 
 .version-badge {
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   font-weight: 600;
   background: var(--color-accent);
   color: #fff;
@@ -2164,6 +2166,10 @@ kbd {
     height: calc(100vh - var(--navbar-height) - 140px);
   }
 
+  .movies-content {
+    height: calc(100vh - var(--navbar-height) - 140px);
+  }
+
   .movie-card,
   .series-card {
     flex: 0 0 140px;
@@ -2210,6 +2216,14 @@ kbd {
   .modal-content {
     max-width: 90%;
     margin: var(--space-md);
+  }
+
+  .movie-details-actions {
+    flex-wrap: wrap;
+  }
+
+  .series-details-actions {
+    flex-wrap: wrap;
   }
 
   /* Series Details */
@@ -2561,6 +2575,10 @@ kbd {
     justify-content: space-between;
   }
 
+  .movie-details-actions {
+    flex-wrap: wrap;
+  }
+
   /* Series Details */
   .series-details {
     padding: var(--space-sm);
@@ -2568,7 +2586,12 @@ kbd {
 
   .series-back-btn {
     padding: var(--space-xs) var(--space-sm);
-    margin-bottom: var(--space-md);
+    margin-bottom: 0;
+    font-size: 0.875rem;
+  }
+
+  .series-reset-progress-btn {
+    padding: var(--space-xs) var(--space-sm);
     font-size: 0.875rem;
   }
 
@@ -2733,6 +2756,10 @@ kbd {
     opacity: 1 !important;
   }
 
+  .history-remove-button {
+    opacity: 1;
+  }
+
   /* Remove hover effects */
   .channel-item:hover,
   .movie-card:hover,
@@ -2744,6 +2771,13 @@ kbd {
   .movie-play-overlay,
   .series-play-overlay {
     opacity: 0.3;
+  }
+
+  .movie-overview-button,
+  .series-overview-button {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
   }
 }
 
@@ -2860,6 +2894,12 @@ kbd {
   min-width: 150px;
 }
 
+.movies-content {
+  position: relative;
+  height: calc(100vh - 120px);
+  overflow: hidden;
+}
+
 .movies-grid {
   display: flex;
   flex-wrap: wrap;
@@ -2871,6 +2911,35 @@ kbd {
   overscroll-behavior: contain;
   justify-content: center;
   align-content: flex-start;
+}
+
+.favorites-shelf {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  padding-bottom: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.favorites-shelf-title {
+  margin: 0 0 var(--space-sm);
+  color: var(--color-text-primary);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.favorites-shelf-cards {
+  display: flex;
+  gap: var(--space-md);
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 2px var(--space-sm);
+  -webkit-overflow-scrolling: touch;
+}
+
+.favorites-shelf-cards > .movie-card,
+.favorites-shelf-cards > .series-card {
+  flex: 0 0 160px;
 }
 
 .movie-card {
@@ -2912,6 +2981,23 @@ kbd {
   background: rgba(0, 0, 0, 0.6);
   opacity: 0;
   transition: opacity 0.2s ease;
+}
+
+.movie-watched-badge {
+  position: absolute;
+  left: var(--space-xs);
+  bottom: var(--space-xs);
+  padding: 4px 7px;
+  border-radius: var(--radius-sm);
+  background: rgba(10, 10, 15, 0.85);
+  color: var(--color-success);
+  font-size: 0.7rem;
+  font-weight: 600;
+  z-index: 2;
+}
+
+.movie-watched-badge.hidden {
+  display: none;
 }
 
 .movie-card:hover .movie-play-overlay {
@@ -3079,6 +3165,38 @@ kbd {
   margin-top: var(--space-xs);
 }
 
+.movie-overview-button,
+  .series-overview-button {
+  width: 100%;
+  margin-top: var(--space-sm);
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 0.2s ease, transform 0.2s ease, background var(--transition-fast);
+  cursor: pointer;
+}
+
+.movie-card:hover .movie-overview-button,
+.movie-card:focus-within .movie-overview-button,
+.series-card:hover .series-overview-button,
+.series-card:focus-within .series-overview-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.movie-overview-button:hover,
+.series-overview-button:hover {
+  background: var(--color-accent-hover);
+}
+
 .series-loader {
   width: 100%;
   display: flex;
@@ -3101,19 +3219,47 @@ kbd {
   display: none;
 }
 
-.series-back-btn {
+.movie-details-actions,
+.series-details-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+.movie-back-btn,
+.movie-play-btn,
+.movie-continue-btn,
+.series-back-btn,
+.series-play-btn,
+.series-reset-progress-btn {
   background: var(--color-bg-tertiary);
   border: none;
   color: var(--color-text-primary);
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
   cursor: pointer;
-  margin-bottom: var(--space-lg);
   transition: background var(--transition-fast);
 }
 
-.series-back-btn:hover {
+.movie-back-btn:hover,
+.movie-play-btn:hover,
+.movie-continue-btn:hover,
+.series-back-btn:hover,
+.series-play-btn:hover,
+.series-reset-progress-btn:hover {
   background: var(--color-bg-hover);
+}
+
+.series-reset-progress-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.series-play-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 .series-details-header {
@@ -3136,6 +3282,10 @@ kbd {
   object-fit: cover;
 }
 
+.series-details-header img.series-poster {
+  object-fit: cover;
+}
+
 .series-info h3 {
   font-size: 1.5rem;
   margin: 0 0 var(--space-md) 0;
@@ -3146,6 +3296,21 @@ kbd {
   line-height: 1.6;
   max-height: 200px;
   overflow-y: auto;
+}
+
+.series-overview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  margin: 0 0 var(--space-sm);
+}
+
+.movie-overview-meta {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  margin-bottom: var(--space-sm);
 }
 
 /* Seasons and Episodes */
@@ -3189,6 +3354,18 @@ kbd {
   font-weight: 500;
 }
 
+.season-watched-badge {
+  flex-shrink: 0;
+  color: var(--color-success);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.season-watch-toggle {
+  margin-left: auto;
+}
+
 .episode-list {
   display: flex;
   flex-direction: column;
@@ -3223,6 +3400,10 @@ kbd {
   color: var(--color-accent);
 }
 
+.episode-item.watched .episode-number {
+  color: var(--color-success);
+}
+
 .episode-title {
   flex: 1;
   overflow: hidden;
@@ -3234,6 +3415,84 @@ kbd {
   flex-shrink: 0;
   font-size: 0.875rem;
   color: var(--color-text-muted);
+}
+
+.episode-watched-badge {
+  flex-shrink: 0;
+  color: var(--color-success);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.episode-resume-badge {
+  flex-shrink: 0;
+  color: var(--color-accent-hover);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.episode-set-progress,
+.episode-watch-toggle,
+.season-watch-toggle {
+  flex-shrink: 0;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.episode-set-progress:hover,
+.episode-watch-toggle:hover,
+.season-watch-toggle:hover {
+  border-color: var(--color-accent);
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--color-text-primary);
+}
+
+.episode-watch-toggle:disabled,
+.episode-set-progress:disabled,
+.season-watch-toggle:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.episode-set-progress {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.episode-item:hover .episode-set-progress,
+.episode-item:focus-within .episode-set-progress {
+  opacity: 1;
+  pointer-events: auto;
+}
+.episode-item .episode-watch-toggle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.episode-item:hover .episode-watch-toggle,
+.episode-item:focus-within .episode-watch-toggle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .episode-set-progress {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .episode-item .episode-watch-toggle {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* Icons */
@@ -3569,19 +3828,72 @@ kbd {
   text-align: right;
 }
 
-.watch-progress {
+.watch-progress-wrap {
+  position: relative;
   flex: 1;
+  min-width: 0;
+}
+
+.watch-progress {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
   height: 6px;
   -webkit-appearance: none;
   appearance: none;
+  --progress: 0%;
   background: rgba(255, 255, 255, 0.3);
   border-radius: 3px;
   cursor: pointer;
 }
 
+.watch-progress-tooltip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 2;
+  padding: 0.25rem 0.45rem;
+  border-radius: var(--radius-sm);
+  background: rgba(20, 20, 24, 0.95);
+  color: #fff;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-50%);
+  transition: opacity var(--transition-fast), visibility var(--transition-fast);
+}
+
+.watch-progress-tooltip.visible {
+  opacity: 1;
+  visibility: visible;
+}
+
 .watch-progress::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 3px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0%,
+    var(--color-accent) var(--progress),
+    rgba(255, 255, 255, 0.3) var(--progress),
+    rgba(255, 255, 255, 0.3) 100%
+  );
+}
+
+.watch-progress::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0%,
+    var(--color-accent) var(--progress),
+    rgba(255, 255, 255, 0.3) var(--progress),
+    rgba(255, 255, 255, 0.3) 100%
+  );
 }
 
 .watch-progress::-webkit-slider-thumb {
@@ -3626,6 +3938,19 @@ kbd {
 
 .watch-btn:hover {
   background: rgba(255, 255, 255, 0.1);
+}
+
+.watch-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.watch-btn:disabled:hover {
+  background: transparent;
+}
+
+.watch-episode-nav {
+  margin: 0 var(--space-xs);
 }
 
 .watch-btn .icon {
@@ -4047,6 +4372,14 @@ kbd {
   color: var(--color-text-muted);
   font-size: 0.813rem;
   flex-shrink: 0;
+}
+
+.watch-episode-item.watched .watch-episode-num {
+  color: var(--color-success);
+}
+
+.watch-episode-item.in-progress .watch-episode-num {
+  color: var(--color-accent-hover);
 }
 
 /* Mobile Responsive */
@@ -4658,6 +4991,45 @@ kbd {
   position: relative;
   aspect-ratio: 2/3;
   overflow: hidden;
+}
+
+.history-remove-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+}
+
+.history-remove-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.dashboard-card:hover .history-remove-button,
+.dashboard-card:focus-within .history-remove-button {
+  opacity: 1;
+}
+
+.history-remove-button:hover {
+  background: var(--color-error);
+}
+
+.history-remove-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .card-image img {

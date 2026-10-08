@@ -110,7 +110,7 @@ class App {
         document.querySelectorAll('.nav-link').forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
-                this.navigateTo(link.dataset.page);
+                this.navigateTo(link.dataset.page, false, true);
             });
         });
 
@@ -158,7 +158,11 @@ class App {
 
         // Navigate to the page from URL hash, or default to home
         const hash = window.location.hash.slice(1); // Remove #
-        const initialPage = hash && this.pages[hash] ? hash : 'home';
+        let initialPage = hash && this.pages[hash] ? hash : 'home';
+        if (initialPage === 'watch') {
+            const restored = await this.pages.watch.restorePlaybackAfterReload();
+            if (!restored) initialPage = 'home';
+        }
         this.navigateTo(initialPage, true); // true = replace history (don't add)
 
         console.log('NodeCast TV initialized');
@@ -240,9 +244,12 @@ class App {
         navbar.appendChild(logoutLink);
     }
 
-    navigateTo(pageName, replaceHistory = false) {
-        // Don't navigate if already on this page
+    navigateTo(pageName, replaceHistory = false, resetPage = false) {
+        const refreshablePages = ['live', 'guide', 'movies', 'series'];
         if (this.currentPage === pageName && !replaceHistory) {
+            if (resetPage && refreshablePages.includes(pageName)) {
+                this.pages[pageName]?.resetFiltersAndRefresh?.();
+            }
             return;
         }
 
@@ -273,7 +280,7 @@ class App {
         this.currentPage = pageName;
 
         if (this.pages[pageName]?.show) {
-            this.pages[pageName].show();
+            this.pages[pageName].show({ resetFilters: resetPage && refreshablePages.includes(pageName) });
         }
     }
 }

@@ -6,8 +6,8 @@ index dd74211..9205ef7 100644
    <meta name="mobile-web-app-capable" content="yes">
    <title>nodecast-tv | IPTV Player</title>
    <meta name="description" content="Stream live TV, movies, and series with EPG support">
--  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+-  <link rel="icon" type="image/svg+xml" href="/funky-tv-logo.svg">
++  <link rel="icon" type="image/svg+xml" href="funky-tv-logo.svg">
    <link rel="stylesheet" href="css/main.css">
    <link rel="preconnect" href="https://fonts.googleapis.com">
    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -819,8 +819,8 @@ index 454acfe..34bcb46 100644
      <meta charset="UTF-8">
      <meta name="viewport" content="width=device-width, initial-scale=1.0">
      <title>Login - NodeCast TV</title>
--    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+-    <link rel="icon" type="image/svg+xml" href="/funky-tv-logo.svg">
++    <link rel="icon" type="image/svg+xml" href="funky-tv-logo.svg">
      <link rel="stylesheet" href="css/main.css">
      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
      <style>

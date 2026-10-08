@@ -28,6 +28,7 @@ class VideoPlayer {
         this.isUsingProxy = false;
         this.currentUrl = null;
         this.settingsLoaded = false;
+        this.settingsSaveTimeout = null;
 
         // Settings - start with defaults, load from server async
         this.settings = this.getDefaultSettings();
@@ -53,6 +54,7 @@ class VideoPlayer {
             forceTranscode: false,
             forceRemux: false,
             autoTranscode: true,
+            transcodeStartup: 'balanced',
             streamFormat: 'm3u8',
             epgRefreshInterval: '24'
         };
@@ -605,8 +607,12 @@ class VideoPlayer {
         // Save volume changes
         this.video.addEventListener('volumechange', () => {
             if (this.settings.rememberVolume) {
-                this.settings.lastVolume = Math.round(this.video.volume * 100);
-                this.saveSettings();
+                const volume = Math.round(this.video.volume * 100);
+                if (volume === Number(this.settings.lastVolume)) return;
+
+                this.settings.lastVolume = volume;
+                clearTimeout(this.settingsSaveTimeout);
+                this.settingsSaveTimeout = setTimeout(() => this.saveSettings(), 400);
             }
         });
 
@@ -818,7 +824,7 @@ class VideoPlayer {
             const res = await fetch('/api/transcode/session', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, ...options })
+                body: JSON.stringify({ url, isLive: true, ...options })
             });
             if (!res.ok) throw new Error('Failed to start session');
             const session = await res.json();

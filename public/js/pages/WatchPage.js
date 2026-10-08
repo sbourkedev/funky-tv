@@ -27,10 +27,13 @@ class WatchPage {
         this.playPauseBtn = document.getElementById('watch-play-pause');
         this.skipBackBtn = document.getElementById('watch-skip-back');
         this.skipFwdBtn = document.getElementById('watch-skip-fwd');
+        this.previousEpisodeBtn = document.getElementById('watch-previous-episode');
+        this.nextEpisodeBtn = document.getElementById('watch-next-episode-button');
         this.muteBtn = document.getElementById('watch-mute');
         this.volumeSlider = document.getElementById('watch-volume');
         this.fullscreenBtn = document.getElementById('watch-fullscreen');
         this.progressSlider = document.getElementById('watch-progress');
+        this.progressTooltip = document.getElementById('watch-progress-tooltip');
         this.timeCurrent = document.getElementById('watch-time-current');
         this.timeTotal = document.getElementById('watch-time-total');
         this.scrollHint = document.getElementById('watch-scroll-hint');
@@ -90,9 +93,16 @@ class WatchPage {
         this.nextEpisodeInterval = null;
         this.nextEpisodeShowing = false;
         this.nextEpisodeDismissed = false;
+        this.nextEpisodeCountdownStarted = false;
 
         // Watch history
         this.historyInterval = null;
+        this.progressSaveQueue = Promise.resolve();
+        this.isStopping = false;
+        this.episodeWatchStatus = new Map();
+        this.reloadSnapshotKey = 'nodecast-watch-reload';
+        this.lastReloadSnapshotAt = 0;
+        this.autoplayBlocked = false;
 
         this.init();
     }
@@ -142,6 +152,8 @@ class WatchPage {
         // Skip buttons
         this.skipBackBtn?.addEventListener('click', () => this.skip(-10));
         this.skipFwdBtn?.addEventListener('click', () => this.skip(10));
+        this.previousEpisodeBtn?.addEventListener('click', () => this.playAdjacentEpisode(-1));
+        this.nextEpisodeBtn?.addEventListener('click', () => this.playAdjacentEpisode(1));
 
         // Volume
         this.muteBtn?.addEventListener('click', () => this.toggleMute());
@@ -180,16 +192,35 @@ class WatchPage {
         });
 
         // Progress bar
-        this.progressSlider?.addEventListener('input', (e) => this.seek(e.target.value));
+        this.progressSlider?.addEventListener('input', (e) => {
+            e.target.style.setProperty('--progress', `${e.target.value}%`);
+        });
+        this.progressSlider?.addEventListener('change', (e) => this.seek(e.target.value));
+        this.progressSlider?.addEventListener('pointermove', (event) => this.updateProgressTooltip(event));
+        this.progressSlider?.addEventListener('pointerleave', () => this.hideProgressTooltip());
+
+        window.addEventListener('pagehide', () => {
+            this.persistPlaybackSnapshot(true);
+            this.saveProgressOnPageHide();
+            this.cleanupTranscodeSessionOnPageHide();
+        });
 
         // Video events
-        this.video?.addEventListener('timeupdate', () => this.updateProgress());
+        this.video?.addEventListener('timeupdate', () => {
+            this.updateProgress();
+            this.persistPlaybackSnapshot();
+        });
         this.video?.addEventListener('loadedmetadata', () => this.onMetadataLoaded());
+        this.video?.addEventListener('durationchange', () => {
+            this.updateProgress();
+        });
         this.video?.addEventListener('play', () => this.onPlay());
         this.video?.addEventListener('pause', () => this.onPause());
         this.video?.addEventListener('ended', () => this.onEnded());
         this.video?.addEventListener('error', (e) => this.onError(e));
-        this.video?.addEventListener('waiting', () => this.showLoading());
+        this.video?.addEventListener('waiting', () => {
+            if (!this.autoplayBlocked) this.showLoading();
+        });
         this.video?.addEventListener('canplay', () => this.hideLoading());
 
         // Overlay auto-hide + click to toggle play
@@ -246,11 +277,16 @@ class WatchPage {
      * @param {string} streamUrl - Stream URL
      */
     async play(content, streamUrl) {
+        // Persist the outgoing item before replacing its content metadata.
+        if (this.content) await this.stop();
+
+        this.isStopping = false;
         this.content = content;
         this.contentType = content.type;
         this.seriesInfo = content.seriesInfo || null;
         this.currentSeason = content.currentSeason || null;
         this.currentEpisode = content.currentEpisode || null;
+        this.updateEpisodeNavigation();
         this.resumeTime = content.resumeTime || 0;
         this.containerExtension = content.containerExtension || 'mp4';
         this.returnPage = content.type === 'movie' ? 'movies' : 'series';
@@ -274,6 +310,7 @@ class WatchPage {
 
         // Load video
         await this.loadVideo(streamUrl);
+        this.persistPlaybackSnapshot(true);
 
         // Show Now Playing indicator in navbar
         this.showNowPlaying(content.title);
@@ -289,6 +326,7 @@ class WatchPage {
         } else {
             this.recommendedSection?.classList.add('hidden');
             this.episodesSection?.classList.remove('hidden');
+            await this.loadWatchedEpisodes(content.sourceId, content.seriesId);
             this.renderEpisodes();
         }
 
@@ -299,6 +337,123 @@ class WatchPage {
 
         // Start watch history tracking
         this.startHistoryTracking();
+    }
+
+    async restorePlaybackAfterReload() {
+        let snapshot;
+        try {
+            snapshot = JSON.parse(sessionStorage.getItem(this.reloadSnapshotKey) || 'null');
+        } catch (err) {
+            console.warn('[WatchPage] Could not read saved playback state:', err);
+            return false;
+        }
+
+        const savedContent = snapshot?.content;
+        if (!savedContent?.sourceId || !savedContent?.id || !['movie', 'series'].includes(savedContent.type)) {
+            return false;
+        }
+
+        try {
+            const content = {
+                ...savedContent,
+                resumeTime: Math.max(0, Number(snapshot.resumeTime) || 0)
+            };
+            if (content.type === 'series') {
+                content.seriesInfo = await API.proxy.xtream.seriesInfo(content.sourceId, content.seriesId);
+            }
+
+            const result = await API.proxy.xtream.getStreamUrl(
+                content.sourceId,
+                content.id,
+                content.type,
+                content.containerExtension || 'mp4'
+            );
+            if (!result?.url) return false;
+
+            await this.play(content, result.url);
+            return true;
+        } catch (err) {
+            console.error('[WatchPage] Could not restore playback after reload:', err);
+            return false;
+        }
+    }
+
+    persistPlaybackSnapshot(force = false) {
+        if (!this.content || !this.video || this.isStopping) return;
+        if (this.video.ended) {
+            sessionStorage.removeItem(this.reloadSnapshotKey);
+            return;
+        }
+
+        const now = Date.now();
+        if (!force && now - this.lastReloadSnapshotAt < 3000) return;
+
+        const content = {};
+        [
+            'type', 'id', 'title', 'subtitle', 'poster', 'description', 'year', 'rating',
+            'sourceId', 'seriesId', 'currentSeason', 'currentEpisode', 'containerExtension', 'categoryId'
+        ].forEach(key => {
+            if (this.content[key] !== undefined) content[key] = this.content[key];
+        });
+
+        const resumeTime = Math.max(0, (Number(this.video.currentTime) || 0) + (this.playbackOffset || 0));
+        try {
+            sessionStorage.setItem(this.reloadSnapshotKey, JSON.stringify({ content, resumeTime }));
+            this.lastReloadSnapshotAt = now;
+        } catch (err) {
+            console.warn('[WatchPage] Could not save playback state for reload:', err);
+        }
+    }
+
+    saveProgressOnPageHide() {
+        if (!this.content || !this.video || this.isStopping) return;
+
+        const duration = Math.floor(this.knownDuration || this.video.duration);
+        const progress = Math.floor((Number(this.video.currentTime) || 0) + (this.playbackOffset || 0));
+        if (!Number.isFinite(progress) || !Number.isFinite(duration) || duration <= 0) return;
+
+        const data = {
+            title: this.content.title || 'Unknown Title',
+            subtitle: this.content.subtitle || (this.content.type === 'movie' ? 'Movie' : 'Series'),
+            poster: this.content.poster,
+            sourceId: this.content.sourceId,
+            containerExtension: this.containerExtension,
+            seriesId: this.content.seriesId || null,
+            currentSeason: this.currentSeason || null,
+            currentEpisode: this.currentEpisode || null
+        };
+        const token = localStorage.getItem('authToken');
+
+        fetch('/api/history', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {})
+            },
+            body: JSON.stringify({
+                id: this.content.id,
+                type: this.content.type === 'movie' ? 'movie' : 'episode',
+                sourceId: this.content.sourceId,
+                parentId: this.content.type === 'series' ? this.content.seriesId : null,
+                progress,
+                duration,
+                data
+            }),
+            keepalive: true
+        }).catch(err => console.warn('[History] Could not save progress during page reload:', err));
+    }
+
+    cleanupTranscodeSessionOnPageHide() {
+        if (!this.currentSessionId) return;
+
+        const sessionId = this.currentSessionId;
+        const token = localStorage.getItem('authToken');
+        fetch(`/api/transcode/${encodeURIComponent(sessionId)}`, {
+            method: 'DELETE',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            keepalive: true
+        }).catch(err => console.warn('[WatchPage] Could not clean up transcode session during reload:', err));
+        this.currentSessionId = null;
     }
 
     /**
@@ -327,41 +482,53 @@ class WatchPage {
      * Start a HLS transcode session
      */
     async startTranscodeSession(url, options = {}) {
+        const effectiveOptions = { ...options };
+        const seekOffset = Number(effectiveOptions.seekOffset ?? this.resumeTime) || 0;
+
+        // Stream copy can only begin at a keyframe, which can put playback a few
+        // seconds away from the saved resume point. Re-encode resumed seeks so
+        // FFmpeg can decode and discard frames up to the exact requested time.
+        if (seekOffset > 0 && effectiveOptions.accurateSeek && effectiveOptions.videoMode === 'copy') {
+            effectiveOptions.videoMode = 'encode';
+            this.updateTranscodeStatus('transcoding', 'Transcoding (Accurate Seek)');
+            console.log('[WatchPage] Enabling video encoding for accurate seek:', seekOffset);
+        }
+
+        effectiveOptions.seekOffset = seekOffset;
+        this.currentTranscodeOptions = { ...effectiveOptions };
         try {
-            console.log('[WatchPage] Starting HLS transcode session...', options);
+            console.log('[WatchPage] Starting HLS transcode session...', effectiveOptions);
             const res = await fetch('/api/transcode/session', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    url,
-                    seekOffset: this.resumeTime, // Pass resume point to backend
-                    ...options
-                })
+                body: JSON.stringify({ url, ...effectiveOptions })
             });
             if (!res.ok) throw new Error('Failed to start session');
             const session = await res.json();
             this.currentSessionId = session.sessionId;
+            this.playbackOffset = seekOffset;
+            if (this.playbackOffset > 0) this.resumeTime = 0;
+            this.updateProgress();
             return session.playlistUrl;
         } catch (err) {
             console.error('[WatchPage] Session start failed:', err);
             // Fallback to direct transcode if session fails
-            return `/api/transcode?url=${encodeURIComponent(url)}`;
+            return '/api/transcode?url=' + encodeURIComponent(url);
         }
     }
-
     /**
      * Stop and cleanup current transcode session
      */
     async stopTranscodeSession() {
         if (this.currentSessionId) {
-            console.log('[WatchPage] Stopping transcode session:', this.currentSessionId);
+            const sessionId = this.currentSessionId;
+            this.currentSessionId = null;
+            console.log('[WatchPage] Stopping transcode session:', sessionId);
             try {
-                // Fire and forget cleanup
-                fetch(`/api/transcode/${this.currentSessionId}`, { method: 'DELETE' });
+                await fetch(`/api/transcode/${sessionId}`, { method: 'DELETE' });
             } catch (err) {
                 console.error('Failed to stop session:', err);
             }
-            this.currentSessionId = null;
         }
     }
 
@@ -412,9 +579,12 @@ class WatchPage {
     async loadVideo(url) {
         // Store the URL for copy functionality
         this.currentUrl = url;
+        this.autoplayBlocked = false;
 
-        // Stop any existing playback
-        this.stop();
+        this.knownDuration = null;
+        this.resumeAfterSeek = null;
+        this.playbackOffset = 0;
+        this.currentTranscodeOptions = null;
 
         // Show loading spinner
         this.showLoading();
@@ -432,6 +602,8 @@ class WatchPage {
         const isRawTs = url.includes('.ts') && !url.includes('.m3u8');
         const isDirectVideo = url.includes('.mp4') || url.includes('.mkv') || url.includes('.avi');
 
+        let probeInfo = null;
+
         // Priority 0: Auto Transcode (Smart) - probe first, then decide
         if (settings.autoTranscode) {
             console.log('[WatchPage] Auto Transcode enabled. Probing stream...');
@@ -439,6 +611,7 @@ class WatchPage {
                 const ua = settings.userAgentPreset === 'custom' ? settings.userAgentCustom : settings.userAgentPreset;
                 const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(url)}&ua=${encodeURIComponent(ua || '')}`);
                 const info = await probeRes.json();
+                probeInfo = info;
                 console.log(`[WatchPage] Probe result: video=${info.video}, audio=${info.audio}, ${info.width}x${info.height}, compatible=${info.compatible}`);
 
                 // Store early probe info for quality display
@@ -446,6 +619,7 @@ class WatchPage {
                 this.updateQualityBadge();
 
                 if (info.needsTranscode || settings.upscaleEnabled) {
+                    this.knownDuration = Number.isFinite(Number(info.duration)) ? Number(info.duration) : null;
                     console.log(`[WatchPage] Auto: Using HLS transcode session (${settings.upscaleEnabled ? 'Upscaling' : 'Incompatible audio/video'})`);
 
                     // Heuristic: If video is h264/compat, copy video. Usage: Audio fix. 
@@ -457,7 +631,8 @@ class WatchPage {
                     this.updateTranscodeStatus(statusMode, statusText);
                     const playlistUrl = await this.startTranscodeSession(url, {
                         videoMode,
-                        seekOffset: this.resumeTime, // Ensure seekOffset is passed
+                        seekOffset: this.resumeTime,
+                        accurateSeek: this.resumeTime > 0, // Accurate when resuming a saved position
                         videoCodec: info.video,
                         audioCodec: info.audio,
                         audioChannels: info.audioChannels
@@ -472,9 +647,7 @@ class WatchPage {
                     this.updateTranscodeStatus('remuxing', 'Remux (Auto)');
                     const finalUrl = `/api/remux?url=${encodeURIComponent(url)}`;
                     this.video.src = finalUrl;
-                    this.video.play().catch(e => {
-                        if (e.name !== 'AbortError') console.error('[WatchPage] Autoplay error:', e);
-                    });
+                    this.video.play().catch(e => this.handlePlaybackStartError(e));
                     this.setVolumeFromStorage();
                     return;
                 }
@@ -488,6 +661,16 @@ class WatchPage {
 
         // Priority 1: Force Video Transcode (Full) or Upscaling
         if (settings.forceVideoTranscode || settings.upscaleEnabled) {
+            if (!probeInfo) {
+                try {
+                    const ua = settings.userAgentPreset === 'custom' ? settings.userAgentCustom : settings.userAgentPreset;
+                    const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(url)}&ua=${encodeURIComponent(ua || '')}`);
+                    probeInfo = await probeRes.json();
+                } catch (err) {
+                    console.warn('[WatchPage] Could not determine source duration:', err.message);
+                }
+            }
+            this.knownDuration = Number.isFinite(Number(probeInfo?.duration)) ? Number(probeInfo.duration) : null;
             const statusText = settings.upscaleEnabled ? 'Upscaling' : 'Transcoding (Video)';
             const statusMode = settings.upscaleEnabled ? 'upscaling' : 'transcoding';
             console.log(`[WatchPage] ${statusText} enabled. Starting session (encode)...`);
@@ -511,13 +694,15 @@ class WatchPage {
                 const ua = settings.userAgentPreset === 'custom' ? settings.userAgentCustom : settings.userAgentPreset;
                 const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(url)}&ua=${encodeURIComponent(ua || '')}`);
                 const info = await probeRes.json();
+                this.knownDuration = Number.isFinite(Number(info.duration)) ? Number(info.duration) : null;
                 videoCodec = info.video;
             } catch (e) { console.warn('Probe failed for force audio, assuming h264'); }
 
             const playlistUrl = await this.startTranscodeSession(url, {
                 videoMode: 'copy',
                 videoCodec,
-                seekOffset: this.resumeTime
+                seekOffset: this.resumeTime,
+                accurateSeek: this.resumeTime > 0
             });
             this.playHls(playlistUrl);
             this.setVolumeFromStorage();
@@ -530,9 +715,7 @@ class WatchPage {
             this.updateTranscodeStatus('remuxing', 'Remux (Force)');
             const finalUrl = `/api/remux?url=${encodeURIComponent(url)}`;
             this.video.src = finalUrl;
-            this.video.play().catch(e => {
-                if (e.name !== 'AbortError') console.error('[WatchPage] Autoplay error:', e);
-            });
+            this.video.play().catch(e => this.handlePlaybackStartError(e));
             this.setVolumeFromStorage();
             return;
         }
@@ -552,9 +735,7 @@ class WatchPage {
             // Direct playback for mp4/mkv/avi
             this.updateTranscodeStatus('direct', 'Direct Play');
             this.video.src = finalUrl;
-            this.video.play().catch(e => {
-                if (e.name !== 'AbortError') console.error('[WatchPage] Autoplay error:', e);
-            });
+            this.video.play().catch(e => this.handlePlaybackStartError(e));
         }
 
         this.setVolumeFromStorage();
@@ -590,9 +771,15 @@ class WatchPage {
         });
 
         this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            this.video.play().catch(e => {
-                if (e.name !== 'AbortError') console.error('[WatchPage] Autoplay error:', e);
-            });
+            const shouldPlay = this.resumeAfterSeek ?? true;
+            if (typeof this.resumeAfterSeek === 'boolean') {
+                this.pendingSeekTarget = null;
+                this.updateProgress();
+            }
+            this.resumeAfterSeek = null;
+            if (shouldPlay) {
+                this.video.play().catch(e => this.handlePlaybackStartError(e));
+            }
         });
 
         this.hls.on(Hls.Events.ERROR, (event, data) => {
@@ -616,10 +803,14 @@ class WatchPage {
         if (this.volumeSlider) this.volumeSlider.value = savedVolume;
     }
 
-    stop() {
+    async stop() {
+        this.isStopping = true;
+        sessionStorage.removeItem(this.reloadSnapshotKey);
+        this.pendingSeekTarget = null;
+
         // Stop history tracking and save final progress
         this.stopHistoryTracking();
-        this.saveProgress();
+        await this.saveProgress(false, true);
 
         // Cleanup transcode session if exists
         this.stopTranscodeSession();
@@ -642,28 +833,145 @@ class WatchPage {
         }
 
         this.hideNowPlaying();
+        this.content = null;
+        this.contentType = null;
+        this.playbackOffset = 0;
     }
 
     // === Playback Controls ===
 
     togglePlay() {
         if (this.video.paused) {
-            this.video.play().catch(console.error);
+            this.autoplayBlocked = false;
+            this.video.play().catch(e => this.handlePlaybackStartError(e));
         } else {
             this.video.pause();
         }
     }
 
+    handlePlaybackStartError(error) {
+        if (error?.name === 'AbortError') return;
+        if (error?.name === 'NotAllowedError') {
+            this.autoplayBlocked = true;
+            this.hideLoading();
+            this.onPause();
+            return;
+        }
+        console.error('[WatchPage] Playback start failed:', error);
+    }
+
     skip(seconds) {
         if (this.video) {
+            if (Number.isFinite(this.knownDuration) && this.knownDuration > 0) {
+                const sourceTime = this.video.currentTime + (this.playbackOffset || 0) + seconds;
+                this.seek((sourceTime / this.knownDuration) * 100);
+                return;
+            }
             this.video.currentTime = Math.max(0, Math.min(this.video.currentTime + seconds, this.video.duration || 0));
         }
     }
 
     seek(percent) {
-        if (this.video && this.video.duration) {
-            this.video.currentTime = (percent / 100) * this.video.duration;
+        if (!this.video || !Number.isFinite(this.knownDuration) || this.knownDuration <= 0) return;
+
+        const targetTime = Math.min(this.knownDuration, Math.max(0, Number(percent) / 100 * this.knownDuration));
+        this.pendingSeekTarget = targetTime;
+        if (this.progressSlider) {
+            this.progressSlider.value = (targetTime / this.knownDuration) * 100;
+            this.progressSlider.style.setProperty('--progress', `${this.progressSlider.value}%`);
         }
+        const localTarget = targetTime - (this.playbackOffset || 0);
+        let isBuffered = false;
+        for (let i = 0; i < this.video.seekable.length; i++) {
+            if (localTarget >= this.video.seekable.start(i) && localTarget <= this.video.seekable.end(i)) {
+                isBuffered = true;
+                break;
+            }
+        }
+        if (!isBuffered) {
+            for (let i = 0; i < this.video.buffered.length; i++) {
+                if (localTarget >= this.video.buffered.start(i) && localTarget <= this.video.buffered.end(i)) {
+                    isBuffered = true;
+                    break;
+                }
+            }
+        }
+
+        if (this.currentSessionId && !isBuffered) {
+            this.restartTranscodeAt(targetTime);
+            return;
+        }
+
+        if (Number.isFinite(this.video.duration) && localTarget >= 0 && localTarget <= this.video.duration) {
+            if (Math.abs(this.video.currentTime - localTarget) < 0.25) {
+                this.pendingSeekTarget = null;
+                this.updateProgress();
+                return;
+            }
+            const onSeeked = () => {
+                this.video.removeEventListener('seeked', onSeeked);
+                if (this.pendingSeekTarget === targetTime) {
+                    this.pendingSeekTarget = null;
+                    this.updateProgress();
+                }
+            };
+            this.video.addEventListener('seeked', onSeeked);
+            this.video.currentTime = localTarget;
+        } else {
+            this.pendingSeekTarget = null;
+            this.updateProgress();
+        }
+    }
+
+    updateProgressTooltip(event) {
+        const duration = Number.isFinite(this.knownDuration) && this.knownDuration > 0
+            ? this.knownDuration
+            : this.video?.duration;
+        if (!this.progressSlider || !this.progressTooltip || !Number.isFinite(duration) || duration <= 0 || event.pointerType === 'touch') {
+            this.hideProgressTooltip();
+            return;
+        }
+
+        const sliderRect = this.progressSlider.getBoundingClientRect();
+        const wrapperRect = this.progressSlider.parentElement.getBoundingClientRect();
+        if (!sliderRect.width || !wrapperRect.width) {
+            this.hideProgressTooltip();
+            return;
+        }
+
+        const ratio = Math.min(1, Math.max(0, (event.clientX - sliderRect.left) / sliderRect.width));
+        this.progressTooltip.textContent = this.formatTime(ratio * duration);
+        const tooltipHalfWidth = this.progressTooltip.offsetWidth / 2;
+        const x = Math.min(wrapperRect.width - tooltipHalfWidth, Math.max(tooltipHalfWidth, event.clientX - wrapperRect.left));
+
+        this.progressTooltip.style.left = `${x}px`;
+        this.progressTooltip.classList.add('visible');
+        this.progressTooltip.setAttribute('aria-hidden', 'false');
+    }
+
+    hideProgressTooltip() {
+        this.progressTooltip?.classList.remove('visible');
+        this.progressTooltip?.setAttribute('aria-hidden', 'true');
+    }
+
+    async restartTranscodeAt(targetTime) {
+        if (!this.currentSessionId || !this.currentUrl) return;
+
+        const shouldPlay = !this.video.paused;
+        const options = { ...(this.currentTranscodeOptions || {}), seekOffset: targetTime };
+        this.video.pause();
+        this.showLoading();
+        if (this.hls) {
+            this.hls.destroy();
+            this.hls = null;
+        }
+        this.video.removeAttribute('src');
+        this.video.load();
+        await this.stopTranscodeSession();
+
+        const playlistUrl = await this.startTranscodeSession(this.currentUrl, options);
+        this.resumeAfterSeek = shouldPlay;
+        this.playHls(playlistUrl);
     }
 
     toggleMute() {
@@ -768,23 +1076,41 @@ class WatchPage {
     // === UI Updates ===
 
     updateProgress() {
-        if (!this.video || !this.video.duration) return;
+        if (!this.video) return;
 
-        const percent = (this.video.currentTime / this.video.duration) * 100;
-        this.progressSlider.value = percent;
-        this.timeCurrent.textContent = this.formatTime(this.video.currentTime);
+        const duration = Number.isFinite(this.knownDuration) && this.knownDuration > 0
+            ? this.knownDuration
+            : this.video.duration;
+        const hasFiniteDuration = Number.isFinite(duration) && duration > 0;
+        const currentTime = Number.isFinite(this.pendingSeekTarget)
+            ? this.pendingSeekTarget
+            : (Number.isFinite(this.video.currentTime) ? this.video.currentTime : 0)
+                + (this.playbackOffset || 0);
 
-        // Show "Up Next" panel early for series (like streaming services do during credits)
+        if (this.timeCurrent) this.timeCurrent.textContent = this.formatTime(currentTime);
+        if (this.timeTotal) this.timeTotal.textContent = hasFiniteDuration ? this.formatTime(duration) : '--:--';
+        if (this.progressSlider) {
+            this.progressSlider.disabled = !hasFiniteDuration;
+            const progressPercent = hasFiniteDuration
+                ? Math.min(100, Math.max(0, (currentTime / duration) * 100))
+                : 0;
+            this.progressSlider.value = progressPercent;
+            this.progressSlider.style.setProperty('--progress', `${progressPercent}%`);
+        }
+
+        if (!hasFiniteDuration) return;
+
+        // Show "Up Next" near the estimated start of credits.
         // Only show if auto-play next episode is enabled
         const autoPlayEnabled = this.app?.player?.settings?.autoPlayNextEpisode;
         if (autoPlayEnabled && this.contentType === 'series' && this.seriesInfo && !this.nextEpisodeShowing && !this.nextEpisodeDismissed) {
-            const duration = this.video.duration;
-            const currentTime = this.video.currentTime;
+            const duration = this.knownDuration || this.video.duration;
+            const currentTime = this.video.currentTime + (this.playbackOffset || 0);
 
             // Only proceed if we have reliable duration data
             if (isFinite(duration) && duration >= 180 && currentTime >= 120) {
                 const timeRemaining = duration - currentTime;
-                const creditsThreshold = 10; // seconds before end to show "Up Next"
+                const creditsThreshold = 60; // Estimate credits start as one minute before the end.
 
                 if (timeRemaining <= creditsThreshold && timeRemaining > 0) {
                     const nextEp = this.getNextEpisode();
@@ -793,11 +1119,19 @@ class WatchPage {
                         this.showNextEpisodePanel(nextEp);
                     }
                 }
+
+                // Give viewers the estimated credits window, then start the existing
+                // 10-second autoplay countdown near the episode's end.
+                if (this.nextEpisodeShowing && timeRemaining <= 10 && timeRemaining > 0) {
+                    this.startNextEpisodeCountdown();
+                }
             }
         }
     }
 
     onMetadataLoaded() {
+        this.updateProgress();
+
         // Detect resolution
         if (this.video && this.video.videoHeight > 0) {
             this.currentStreamInfo = {
@@ -809,7 +1143,7 @@ class WatchPage {
 
         // Handle resumption
         if (this.resumeTime > 0 && this.video) {
-            const duration = this.video.duration;
+            const duration = this.knownDuration || this.video.duration;
             // Only resume if not near the end (95%)
             if (!duration || this.resumeTime < duration * 0.95) {
                 console.log(`[WatchPage] Resuming at ${this.resumeTime}s`);
@@ -817,9 +1151,13 @@ class WatchPage {
             }
             this.resumeTime = 0; // Reset after use
         }
+
+        // Reflect the resume position as soon as the media timestamp is applied.
+        this.updateProgress();
     }
 
     onPlay() {
+        this.autoplayBlocked = false;
         // Update play/pause button icons
         this.playPauseBtn?.querySelector('.icon-play')?.classList.add('hidden');
         this.playPauseBtn?.querySelector('.icon-pause')?.classList.remove('hidden');
@@ -840,15 +1178,19 @@ class WatchPage {
     }
 
     onEnded() {
+        sessionStorage.removeItem(this.reloadSnapshotKey);
+        if (this.contentType === 'series' || this.contentType === 'movie') this.saveProgress(true);
+
         // For series, show next episode panel if not already showing and auto-play is enabled
         const autoPlayEnabled = this.app?.player?.settings?.autoPlayNextEpisode;
-        if (autoPlayEnabled && this.contentType === 'series' && this.seriesInfo && !this.nextEpisodeShowing) {
+        if (autoPlayEnabled && this.contentType === 'series' && this.seriesInfo && !this.nextEpisodeShowing && !this.nextEpisodeDismissed) {
             const nextEp = this.getNextEpisode();
             if (nextEp) {
                 this.nextEpisodeShowing = true;
                 this.showNextEpisodePanel(nextEp);
             }
         }
+        if (this.nextEpisodeShowing && !this.nextEpisodeDismissed) this.startNextEpisodeCountdown();
     }
 
     onError(e) {
@@ -1104,7 +1446,8 @@ class WatchPage {
     scrollToVideo() {
         document.getElementById('page-watch')?.scrollTo({ top: 0, behavior: 'smooth' });
         if (this.video?.paused) {
-            this.video.play().catch(console.error);
+            this.autoplayBlocked = false;
+            this.video.play().catch(e => this.handlePlaybackStartError(e));
         }
     }
 
@@ -1206,8 +1549,11 @@ class WatchPage {
                         ${episodes.map(ep => {
                 const isActive = parseInt(seasonNum) === parseInt(this.currentSeason) &&
                     parseInt(ep.episode_num) === parseInt(this.currentEpisode);
+                const status = this.episodeWatchStatus.get(String(ep.id));
+                const isWatched = Boolean(status?.watched);
+                const inProgress = !isWatched && status?.progress > 0;
                 return `
-                                <div class="watch-episode-item ${isActive ? 'active' : ''}" 
+                                <div class="watch-episode-item ${isActive ? 'active' : ''} ${isWatched ? 'watched' : ''} ${inProgress ? 'in-progress' : ''}" 
                                      data-episode-id="${ep.id}" 
                                      data-season="${seasonNum}"
                                      data-episode="${ep.episode_num}"
@@ -1215,6 +1561,8 @@ class WatchPage {
                                     <span class="watch-episode-num">E${ep.episode_num}</span>
                                     <span class="watch-episode-title">${ep.title || `Episode ${ep.episode_num}`}</span>
                                     <span class="watch-episode-duration">${ep.duration || ''}</span>
+                                    ${isWatched ? '<span class="episode-watched-badge" title="Watched">&#10003; Watched</span>' : ''}
+                                    ${inProgress ? `<span class="episode-resume-badge">Continue &middot; ${this.formatResumeTime(status.progress)}</span>` : ''}
                                 </div>
                             `;
             }).join('')}
@@ -1236,11 +1584,59 @@ class WatchPage {
         });
     }
 
+    async loadWatchedEpisodes(sourceId, seriesId) {
+        this.episodeWatchStatus = new Map();
+        if (!sourceId || !seriesId) return;
+
+        try {
+            const progressRows = await API.history.getSeriesEpisodeProgress(sourceId, seriesId);
+            this.episodeWatchStatus = new Map(progressRows.map(row => [String(row.item_id), row]));
+        } catch (err) {
+            console.warn('[WatchPage] Could not load watched episode status:', err.message);
+        }
+    }
+
+    updateEpisodeWatchStatus(episodeId, status) {
+        const id = String(episodeId);
+        this.episodeWatchStatus.set(id, status);
+        this.seasonsContainer?.querySelectorAll('.watch-episode-item').forEach(item => {
+            if (item.dataset.episodeId !== id) return;
+            item.classList.toggle('watched', Boolean(status.watched));
+            const inProgress = !status.watched && status.progress > 0;
+            item.classList.toggle('in-progress', inProgress);
+            item.querySelector('.episode-watched-badge, .episode-resume-badge')?.remove();
+
+            if (status.watched) {
+                const badge = document.createElement('span');
+                badge.className = 'episode-watched-badge';
+                badge.title = 'Watched';
+                badge.textContent = '\u2713 Watched';
+                item.appendChild(badge);
+            } else if (inProgress) {
+                const badge = document.createElement('span');
+                badge.className = 'episode-resume-badge';
+                badge.textContent = `Continue \u00b7 ${this.formatResumeTime(status.progress)}`;
+                item.appendChild(badge);
+            }
+        });
+    }
+
+    formatResumeTime(seconds) {
+        const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const remainingSeconds = totalSeconds % 60;
+        return hours > 0
+            ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+            : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+    }
+
     async playEpisodeFromList(episodeEl) {
         const episodeId = episodeEl.dataset.episodeId;
         const seasonNum = episodeEl.dataset.season;
         const episodeNum = episodeEl.dataset.episode;
         const container = episodeEl.dataset.container || 'mp4';
+        const episodeStatus = this.episodeWatchStatus.get(String(episodeId));
 
         try {
             const result = await API.proxy.xtream.getStreamUrl(this.content.sourceId, episodeId, 'series', container);
@@ -1261,7 +1657,8 @@ class WatchPage {
                     seriesId: this.content.seriesId,
                     seriesInfo: this.seriesInfo,
                     currentSeason: seasonNum,
-                    currentEpisode: episodeNum
+                    currentEpisode: episodeNum,
+                    resumeTime: episodeStatus && !episodeStatus.watched ? episodeStatus.progress : 0
                 }, result.url);
             }
         } catch (e) {
@@ -1273,36 +1670,68 @@ class WatchPage {
 
     getNextEpisode() {
         if (!this.seriesInfo?.episodes || !this.currentSeason || !this.currentEpisode) return null;
+        const orderedEpisodes = this.getEpisodeOrder();
+        const currentIndex = orderedEpisodes.findIndex(episode =>
+            String(episode.seasonNum) === String(this.currentSeason) &&
+            Number(episode.episode_num) === Number(this.currentEpisode)
+        );
+        return currentIndex >= 0 ? orderedEpisodes[currentIndex + 1] || null : null;
+    }
 
-        const seasons = Object.keys(this.seriesInfo.episodes).sort((a, b) => parseInt(a) - parseInt(b));
-        const currentSeasonEpisodes = this.seriesInfo.episodes[this.currentSeason] || [];
+    getEpisodeOrder() {
+        const episodes = this.seriesInfo?.episodes || {};
+        return Object.keys(episodes)
+            .sort((a, b) => Number(a) - Number(b))
+            .flatMap(seasonNum => (episodes[seasonNum] || [])
+                .slice()
+                .sort((a, b) => Number(a.episode_num) - Number(b.episode_num))
+                .map(episode => ({ ...episode, seasonNum })));
+    }
 
-        // Find next episode in current season
-        const currentEpIndex = currentSeasonEpisodes.findIndex(ep =>
-            parseInt(ep.episode_num) === parseInt(this.currentEpisode)
+    updateEpisodeNavigation() {
+        const canNavigate = this.contentType !== 'movie' && this.currentSeason && this.currentEpisode;
+        const orderedEpisodes = canNavigate ? this.getEpisodeOrder() : [];
+        const currentIndex = orderedEpisodes.findIndex(episode =>
+            String(episode.seasonNum) === String(this.currentSeason) &&
+            Number(episode.episode_num) === Number(this.currentEpisode)
         );
 
-        if (currentEpIndex >= 0 && currentEpIndex < currentSeasonEpisodes.length - 1) {
-            return {
-                ...currentSeasonEpisodes[currentEpIndex + 1],
-                seasonNum: this.currentSeason
-            };
-        }
+        if (this.previousEpisodeBtn) this.previousEpisodeBtn.disabled = currentIndex <= 0;
+        if (this.nextEpisodeBtn) this.nextEpisodeBtn.disabled = currentIndex < 0 || currentIndex >= orderedEpisodes.length - 1;
+    }
 
-        // Try next season
-        const currentSeasonIndex = seasons.indexOf(String(this.currentSeason));
-        if (currentSeasonIndex >= 0 && currentSeasonIndex < seasons.length - 1) {
-            const nextSeason = seasons[currentSeasonIndex + 1];
-            const nextSeasonEpisodes = this.seriesInfo.episodes[nextSeason];
-            if (nextSeasonEpisodes?.length > 0) {
-                return {
-                    ...nextSeasonEpisodes[0],
-                    seasonNum: nextSeason
-                };
-            }
-        }
+    async playAdjacentEpisode(direction) {
+        const orderedEpisodes = this.getEpisodeOrder();
+        const currentIndex = orderedEpisodes.findIndex(episode =>
+            String(episode.seasonNum) === String(this.currentSeason) &&
+            Number(episode.episode_num) === Number(this.currentEpisode)
+        );
+        const target = orderedEpisodes[currentIndex + direction];
+        if (currentIndex < 0 || !target || !this.content) return;
 
-        return null;
+        this.cancelNextEpisode();
+        try {
+            const result = await API.proxy.xtream.getStreamUrl(
+                this.content.sourceId,
+                target.id,
+                'series',
+                target.container_extension || 'mp4'
+            );
+            if (!result?.url) return;
+
+            const episodeStatus = this.episodeWatchStatus.get(String(target.id));
+            this.play({
+                ...this.content,
+                id: target.id,
+                subtitle: `S${target.seasonNum} E${target.episode_num} - ${target.title || `Episode ${target.episode_num}`}`,
+                currentSeason: target.seasonNum,
+                currentEpisode: target.episode_num,
+                containerExtension: target.container_extension || 'mp4',
+                resumeTime: episodeStatus && !episodeStatus.watched ? episodeStatus.progress : 0
+            }, result.url);
+        } catch (error) {
+            console.error('Error changing episode:', error);
+        }
     }
 
     showNextEpisodePanel(nextEp) {
@@ -1312,7 +1741,16 @@ class WatchPage {
         this.nextEpisodePanel.classList.remove('hidden');
         this.nextEpisodePanel.nextEpisodeData = nextEp;
 
-        // Start countdown
+        // Keep the prompt visible through the estimated credits window.
+        this.nextEpisodeCountdownStarted = false;
+        this.nextCountdown.textContent = '…';
+    }
+
+    startNextEpisodeCountdown() {
+        if (this.nextEpisodeCountdownStarted || !this.nextEpisodePanel?.nextEpisodeData) return;
+        this.nextEpisodeCountdownStarted = true;
+
+        // Start the 10-second auto-play countdown.
         this.nextEpisodeCountdown = 10;
         this.nextCountdown.textContent = this.nextEpisodeCountdown;
 
@@ -1364,6 +1802,7 @@ class WatchPage {
         clearInterval(this.nextEpisodeInterval);
         this.nextEpisodePanel?.classList.add('hidden');
         this.nextEpisodeShowing = false;
+        this.nextEpisodeCountdownStarted = false;
         this.nextEpisodeDismissed = true; // Prevent re-triggering
         if (this.nextEpisodePanel) {
             this.nextEpisodePanel.nextEpisodeData = null;
@@ -1372,8 +1811,16 @@ class WatchPage {
 
     // === Navigation ===
 
-    goBack() {
-        this.stop();
+    async goBack() {
+        sessionStorage.removeItem(this.reloadSnapshotKey);
+        const playedContent = this.content;
+        if (playedContent?.type === 'series') {
+            this.app.pages.series?.prepareReturnFromPlayer(playedContent);
+        }
+        await this.stop();
+        if (playedContent?.type === 'series') {
+            await this.app.pages.series?.refreshCurrentSeriesProgress(playedContent);
+        }
         this.cancelNextEpisode();
 
         // Navigate to the page we came from (stored in returnPage)
@@ -1395,7 +1842,7 @@ class WatchPage {
     // ============================================================
 
     startHistoryTracking() {
-        this.stopHistoryTracking(); // Clear existing if any
+        this.stopHistoryTracking();
         this.historyInterval = setInterval(() => this.saveProgress(), 10000); // 10s
     }
 
@@ -1406,35 +1853,51 @@ class WatchPage {
         }
     }
 
-    async saveProgress() {
-        if (!this.content || !this.video || this.video.paused) return;
+    async saveProgress(forceComplete = false, allowPaused = false) {
+        const content = this.content;
+        const video = this.video;
+        if (!content || !video || (video.paused && !forceComplete && !allowPaused)) return;
 
-        const progress = Math.floor(this.video.currentTime);
-        const duration = Math.floor(this.video.duration);
+        const duration = Math.floor(this.knownDuration || video.duration);
+        const progress = forceComplete
+            ? duration
+            : Math.floor(video.currentTime + (this.playbackOffset || 0));
 
         if (isNaN(progress) || isNaN(duration) || duration <= 0) return;
 
-        try {
-            const data = {
-                title: this.content.title || 'Unknown Title',
-                subtitle: this.content.subtitle || (this.content.type === 'movie' ? 'Movie' : 'Series'),
-                poster: this.content.poster,
-                sourceId: this.content.sourceId,
-                containerExtension: this.containerExtension,
-                // Series-specific fields for next episode functionality
-                seriesId: this.content.seriesId || null,
-                currentSeason: this.currentSeason || null,
-                currentEpisode: this.currentEpisode || null
-            };
+        const data = {
+            title: content.title || 'Unknown Title',
+            subtitle: content.subtitle || (content.type === 'movie' ? 'Movie' : 'Series'),
+            poster: content.poster,
+            sourceId: content.sourceId,
+            containerExtension: this.containerExtension,
+            seriesId: content.seriesId || null,
+            currentSeason: this.currentSeason || null,
+            currentEpisode: this.currentEpisode || null
+        };
 
-            await window.API.request('POST', '/history', {
-                id: this.content.id,
-                type: this.content.type === 'movie' ? 'movie' : 'episode',
-                sourceId: this.content.sourceId,
-                progress,
-                duration,
-                data
-            });
+        const saveRequest = () => window.API.request('POST', '/history', {
+            id: content.id,
+            type: content.type === 'movie' ? 'movie' : 'episode',
+            sourceId: content.sourceId,
+            parentId: content.type === 'series' ? content.seriesId : null,
+            progress,
+            duration,
+            data
+        });
+
+        try {
+            // Keep network writes in call order so an older timer save cannot
+            // arrive after and overwrite the final position saved on exit.
+            const previousSave = this.progressSaveQueue || Promise.resolve();
+            const currentSave = previousSave.catch(() => {}).then(saveRequest);
+            this.progressSaveQueue = currentSave;
+            await currentSave;
+
+            if (content.type === 'series') {
+                const watched = forceComplete || progress >= duration * 0.9;
+                this.updateEpisodeWatchStatus(content.id, { progress, duration, watched });
+            }
         } catch (err) {
             console.warn('[History] Failed to save progress:', err);
         }

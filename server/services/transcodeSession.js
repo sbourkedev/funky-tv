@@ -30,6 +30,18 @@ const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes idle timeout
 const SEGMENT_DURATION = 4; // seconds per HLS segment
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 
+// Lower analysis limits can shorten startup time, but some providers need more
+// data before FFmpeg can identify their streams reliably.
+const STARTUP_PROFILES = Object.freeze({
+    fast: { probeSize: '1000000', analyzeDuration: '1000000' },
+    balanced: { probeSize: '2000000', analyzeDuration: '2000000' },
+    stable: { probeSize: '5000000', analyzeDuration: '5000000' }
+});
+
+function getStartupProfile(name) {
+    return STARTUP_PROFILES[name] || STARTUP_PROFILES.balanced;
+}
+
 /**
  * Generate a unique session ID
  */
@@ -72,6 +84,7 @@ class TranscodeSession extends EventEmitter {
             hwEncoder: options.hwEncoder || 'software',
             maxResolution: options.maxResolution || '1080p',
             quality: options.quality || 'medium',
+            isLive: options.isLive === true,
             // Upscaling options
             upscaleEnabled: options.upscaleEnabled || false,
             upscaleMethod: options.upscaleMethod || 'hardware', // 'hardware' or 'software'
@@ -144,8 +157,13 @@ class TranscodeSession extends EventEmitter {
                     this.status = 'error';
                     this.error = `FFmpeg exited with code ${code}`;
                 }
-                this.process = null;
                 this.emit('exit', code);
+            });
+
+            // Keep the process reference until its stdio handles have closed.
+            // Cleanup can then wait for Windows to release generated segments.
+            this.process.on('close', () => {
+                this.process = null;
             });
 
             // Handle spawn errors
@@ -172,6 +190,7 @@ class TranscodeSession extends EventEmitter {
     buildFFmpegArgs() {
         const segmentPattern = path.join(this.dir, 'seg%04d.m4s');
         const videoMode = this.options.videoMode || 'encode';
+        const startupProfile = getStartupProfile(this.options.transcodeStartup);
 
         // Resolve 'auto' encoder to detected hardware, fallback to software
         let encoder = this.options.hwEncoder || 'software';
@@ -194,8 +213,8 @@ class TranscodeSession extends EventEmitter {
 
         // Input options (common)
         args.push(
-            '-probesize', '5000000',
-            '-analyzeduration', '5000000',
+            '-probesize', startupProfile.probeSize,
+            '-analyzeduration', startupProfile.analyzeDuration,
             '-fflags', '+genpts+discardcorrupt',
             '-err_detect', 'ignore_err',
             '-reconnect', '1',
@@ -203,12 +222,19 @@ class TranscodeSession extends EventEmitter {
             '-reconnect_delay_max', '3'
         );
 
-        args.push('-i', this.url);
-
-        // Add seek offset if specified (as output option to avoid Range requests)
-        if (this.options.seekOffset > 0) {
-            args.push('-ss', String(this.options.seekOffset));
+        // Live IPTV providers may reject FFmpeg's range/seek requests with HTTP 405.
+        // Keep VOD inputs seekable so resume and timeline seeking continue to work.
+        if (this.options.isLive) {
+            args.push('-seekable', '0');
         }
+
+        // Seek at the input so FFmpeg can jump directly to the requested VOD
+        // position when the source supports seeking (for example, HTTP Range).
+        if (this.options.seekOffset > 0) {
+            args.push('-accurate_seek', '-ss', String(this.options.seekOffset));
+        }
+
+        args.push('-i', this.url);
 
         // Map streams
         args.push('-map', '0:v:0');
@@ -366,6 +392,7 @@ class TranscodeSession extends EventEmitter {
     getTargetHeight() {
         const resolutionMap = {
             '4k': 2160,
+            '1440p': 1440,
             '1080p': 1080,
             '720p': 720,
             '480p': 480
@@ -515,17 +542,59 @@ class TranscodeSession extends EventEmitter {
      * Stop the transcoding process
      */
     stop() {
-        if (this.process) {
-            console.log(`[TranscodeSession ${this.id}] Stopping FFmpeg process`);
-            this.process.kill('SIGTERM');
-            // Force kill after 2 seconds if still running
-            setTimeout(() => {
-                if (this.process) {
-                    this.process.kill('SIGKILL');
-                }
-            }, 2000);
+        const process = this.process;
+        if (!process) {
+            this.status = 'stopped';
+            return Promise.resolve();
         }
-        this.status = 'stopped';
+
+        console.log(`[TranscodeSession ${this.id}] Stopping FFmpeg process`);
+        return new Promise((resolve) => {
+            let finished = false;
+            let forceKillTimer;
+            let fallbackTimer;
+            const finish = () => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(forceKillTimer);
+                clearTimeout(fallbackTimer);
+                this.status = 'stopped';
+                resolve();
+            };
+
+            process.once('close', finish);
+            const alreadyExited = process.exitCode !== null || process.signalCode !== null;
+
+            if (alreadyExited) {
+                fallbackTimer = setTimeout(finish, 2000);
+                fallbackTimer.unref?.();
+                return;
+            }
+
+            forceKillTimer = setTimeout(() => {
+                if (this.process === process) {
+                    try {
+                        process.kill('SIGKILL');
+                    } catch (err) {
+                        console.warn(`[TranscodeSession ${this.id}] Could not force-stop FFmpeg:`, err.message);
+                    }
+                }
+                // Do not leave cleanup hanging if the child never reports close.
+                fallbackTimer = setTimeout(finish, 2000);
+                fallbackTimer.unref?.();
+            }, 2000);
+
+            try {
+                process.kill('SIGTERM');
+            } catch (err) {
+                console.warn(`[TranscodeSession ${this.id}] Could not stop FFmpeg cleanly:`, err.message);
+                try {
+                    process.kill('SIGKILL');
+                } catch (killErr) {
+                    console.warn(`[TranscodeSession ${this.id}] Could not force-stop FFmpeg:`, killErr.message);
+                }
+            }
+        });
     }
 
     /**
@@ -632,9 +701,14 @@ class TranscodeSession extends EventEmitter {
      * Delete session directory and all segments
      */
     async cleanup() {
-        this.stop();
+        await this.stop();
         try {
-            await fs.rm(this.dir, { recursive: true, force: true });
+            await fs.rm(this.dir, {
+                recursive: true,
+                force: true,
+                maxRetries: 20,
+                retryDelay: 500
+            });
             console.log(`[TranscodeSession ${this.id}] Cleaned up session directory`);
         } catch (err) {
             console.error(`[TranscodeSession ${this.id}] Failed to cleanup:`, err.message);
@@ -768,5 +842,6 @@ module.exports = {
     startCleanupInterval,
     getAllSessions,
     CACHE_DIR,
-    SEGMENT_DURATION
+    SEGMENT_DURATION,
+    getStartupProfile
 };

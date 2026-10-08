@@ -99,6 +99,7 @@ class SettingsPage {
         const hwEncoderSelect = document.getElementById('setting-hw-encoder');
         const maxResolutionSelect = document.getElementById('setting-max-resolution');
         const qualitySelect = document.getElementById('setting-quality');
+        const transcodeStartupSelect = document.getElementById('setting-transcode-startup');
 
         // Stream processing (use -tc suffix IDs from Transcoding tab)
         const forceProxyToggle = document.getElementById('setting-force-proxy-tc');
@@ -125,6 +126,7 @@ class SettingsPage {
         if (hwEncoderSelect) hwEncoderSelect.value = s.hwEncoder || 'auto';
         if (maxResolutionSelect) maxResolutionSelect.value = s.maxResolution || '1080p';
         if (qualitySelect) qualitySelect.value = s.quality || 'medium';
+        if (transcodeStartupSelect) transcodeStartupSelect.value = s.transcodeStartup || 'balanced';
         if (forceProxyToggle) forceProxyToggle.checked = s.forceProxy === true;
         if (autoTranscodeToggle) autoTranscodeToggle.checked = s.autoTranscode !== false;
         if (forceTranscodeToggle) forceTranscodeToggle.checked = s.forceTranscode === true;
@@ -150,6 +152,11 @@ class SettingsPage {
 
         qualitySelect?.addEventListener('change', () => {
             this.app.player.settings.quality = qualitySelect.value;
+            this.app.player.saveSettings();
+        });
+
+        transcodeStartupSelect?.addEventListener('change', () => {
+            this.app.player.settings.transcodeStartup = transcodeStartupSelect.value;
             this.app.player.saveSettings();
         });
 
